@@ -1,0 +1,10 @@
+# Python
+venv/
+code/__pycache__/
+
+# IDE
+.vscode/
+
+# Binaries and Large files
+code/cloudflared.deb
+code/models/
