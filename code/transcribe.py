@@ -33,7 +33,7 @@ DEFAULT_RECORDER_CONFIG: Dict[str, Any] = {
     "language": "vi",
     "silero_sensitivity": 0.4,
     "webrtc_sensitivity": 3,
-    "post_speech_silence_duration": 0.25,
+    "post_speech_silence_duration": 0.4,
     "min_length_of_recording": 0.5,
     "min_gap_between_recordings": 0,
     "enable_realtime_transcription": True,
