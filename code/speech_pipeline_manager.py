@@ -417,7 +417,7 @@ class SpeechPipelineManager:
 
                     # Check for quick answer boundary only if not already provided
                     if not current_gen.quick_answer_provided:
-                        context, overhang = self.text_context.get_context(current_gen.quick_answer)
+                        context, overhang = self.text_context.get_context(current_gen.quick_answer, min_len=3, min_alnum_count=2)
                         if context:
                             logger.info(f"🗣️🧠✔️ [Gen {gen_id}] LLM Worker:  {Colors.apply('QUICK ANSWER FOUND:').magenta} {context}, overhang: {overhang}")
                             current_gen.quick_answer = context
@@ -906,6 +906,10 @@ class SpeechPipelineManager:
             logger.info("🗣️💡 No chat history available to generate a suggestion.")
             return
 
+        if suggestion_type != "goodbye":
+            logger.info("🗣️💡 Adding user silence '[im lặng]' to history.")
+            self.history.append({"role": "user", "content": "[im lặng]"})
+
         logger.info(f"🗣️💡 Requesting LLM to generate a {suggestion_type} suggestion.")
 
         try:
@@ -925,12 +929,22 @@ class SpeechPipelineManager:
             else:
                 suggestion_prompt = "Hãy đưa ra một phản hồi tiếng Việt ngắn gọn, tự nhiên để kiểm tra xem người dùng còn nghe không. Chỉ văn bản thuần túy."
 
-            # Call LLM to generate the suggestion
+            # Normalize history for Gemini compatibility
+            raw_history = self.history[-14:] if suggestion_type != "goodbye" else []
+            normalized_history = []
+            for msg in raw_history:
+                if not msg["content"].strip():
+                    continue
+                if normalized_history and normalized_history[-1]["role"] == msg["role"]:
+                    normalized_history[-1]["content"] += " " + msg["content"]
+                else:
+                    normalized_history.append({"role": msg["role"], "content": msg["content"]})
+
+            # Call LLM to generate the suggestion (no max_new_tokens to avoid truncation bugs)
             suggestion_generator = self.llm.generate(
                 text=suggestion_prompt,
-                history=self.history[-6:] if suggestion_type != "goodbye" else [],
-                use_system_prompt=True if suggestion_type != "goodbye" else False,
-                max_new_tokens=60 if suggestion_type == "goodbye" else 50,
+                history=normalized_history,
+                use_system_prompt=False,
             )
 
             suggestion = "".join(list(suggestion_generator)).strip()
@@ -1018,9 +1032,19 @@ class SpeechPipelineManager:
             self.running_generation.llm_start_time = time.time()
             # TODO: Update history management if needed
             # self.history.append({"role": "user", "content": txt}) # Example history update
+            # Normalize history for Gemini compatibility (no empty messages, alternating roles)
+            normalized_history = []
+            for msg in self.history[-14:]:
+                if not msg["content"].strip():
+                    continue
+                if normalized_history and normalized_history[-1]["role"] == msg["role"]:
+                    normalized_history[-1]["content"] += " " + msg["content"]
+                else:
+                    normalized_history.append({"role": msg["role"], "content": msg["content"]})
+                    
             self.running_generation.llm_generator = self.llm.generate(
                 text=txt,
-                history=self.history[-6:], # Pass only the last 3 turns of history (6 messages)
+                history=normalized_history,
                 use_system_prompt=True,
             )
             logger.info(f"🗣️🧠✔️ [Gen {new_gen_id}] LLM generator created. Setting generator ready event.")

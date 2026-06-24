@@ -11,6 +11,11 @@ from typing import Callable, Generator, Optional
 
 import numpy as np
 from huggingface_hub import hf_hub_download
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except ImportError:
+    pass
 from pydub import AudioSegment
 # Assuming RealtimeTTS is installed and available
 from RealtimeTTS import (CoquiEngine, KokoroEngine, OrpheusEngine,
@@ -73,36 +78,59 @@ class PcmEdgeEngine(BaseEngine):
             logger.warning("[PcmEdgeEngine] Text is empty after markdown cleaning")
             return False
 
-        async def _fetch_mp3() -> bytes:
+        async def _stream_edge_tts():
             communicate = Communicate(clean_text, self.voice)
-            parts = []
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    parts.append(chunk["data"])
-            return b"".join(parts)
+            
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-f", "mp3",
+                "-i", "pipe:0",
+                "-f", "s16le",
+                "-acodec", "pcm_s16le",
+                "-ar", "24000",
+                "-ac", "1",
+                "pipe:1"
+            ]
+            
+            import subprocess
+            import threading
+            try:
+                process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            except FileNotFoundError:
+                logger.error("[PcmEdgeEngine] ffmpeg not found. Ensure static_ffmpeg is working or ffmpeg is in PATH.")
+                return
+
+            def read_stdout():
+                while True:
+                    pcm_bytes = process.stdout.read(1024)
+                    if not pcm_bytes:
+                        break
+                    self.queue.put(pcm_bytes)
+            
+            reader_thread = threading.Thread(target=read_stdout, daemon=True)
+            reader_thread.start()
+
+            try:
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        process.stdin.write(chunk["data"])
+                        process.stdin.flush()
+            except Exception as e:
+                logger.warning(f"[PcmEdgeEngine] Error during edge-tts streaming: {e}")
+            finally:
+                if process.stdin:
+                    process.stdin.close()
+                reader_thread.join()
+                process.wait()
 
         try:
-            mp3_data = asyncio.run(_fetch_mp3())
+            asyncio.run(_stream_edge_tts())
         except RuntimeError:
             # Already inside an event loop (e.g. during FastAPI lifespan)
             import nest_asyncio
             nest_asyncio.apply()
             loop = asyncio.get_event_loop()
-            mp3_data = loop.run_until_complete(_fetch_mp3())
-
-        if not mp3_data:
-            logger.warning("[PcmEdgeEngine] No audio data received from edge-tts")
-            return False
-
-        # Decode MP3 → real PCM 16-bit @ 24000 Hz mono
-        segment = AudioSegment.from_file(io.BytesIO(mp3_data), format="mp3")
-        segment = segment.set_frame_rate(24000).set_channels(1).set_sample_width(2)
-        pcm_bytes = segment.raw_data
-
-        # Queue in 1024-byte chunks (~21ms each @ 24000 Hz 16-bit mono)
-        chunk_size = 1024
-        for i in range(0, len(pcm_bytes), chunk_size):
-            self.queue.put(pcm_bytes[i:i + chunk_size])
+            loop.run_until_complete(_stream_edge_tts())
 
         return True
 
@@ -122,10 +150,10 @@ class PcmEdgeEngine(BaseEngine):
 START_ENGINE = "kokoro"
 Silence = namedtuple("Silence", ("comma", "sentence", "default"))
 ENGINE_SILENCES = {
-    "coqui":   Silence(comma=0.3, sentence=0.6, default=0.3),
-    "kokoro":  Silence(comma=0.3, sentence=0.6, default=0.3),
-    "orpheus": Silence(comma=0.3, sentence=0.6, default=0.3),
-    "edge":    Silence(comma=0.3, sentence=0.6, default=0.3),
+    "coqui":   Silence(comma=0.1, sentence=0.25, default=0.15),
+    "kokoro":  Silence(comma=0.1, sentence=0.25, default=0.15),
+    "orpheus": Silence(comma=0.1, sentence=0.25, default=0.15),
+    "edge":    Silence(comma=0.1, sentence=0.25, default=0.15),
 }
 # Stream chunk sizes influence latency vs. throughput trade-offs
 QUICK_ANSWER_STREAM_CHUNK_SIZE = 8

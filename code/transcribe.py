@@ -25,32 +25,32 @@ START_STT_SERVER = False # Set to True to use the client/server version of Realt
 DEFAULT_RECORDER_CONFIG: Dict[str, Any] = {
     "use_microphone": False,
     "spinner": False,
-    # Prefer a multilingual base model for Vietnamese recognition.
+    # Prefer a large multilingual model for Vietnamese recognition.
     "model": "base",
     "realtime_model_type": "base",
-    "use_main_model_for_realtime": False,
+    "use_main_model_for_realtime": True,
     # Will be overridden by the runtime language in __init__.
     "language": "vi",
-    "silero_sensitivity": 0.05,
+    "silero_sensitivity": 0.4,
     "webrtc_sensitivity": 3,
-    "post_speech_silence_duration": 0.7,
+    "post_speech_silence_duration": 0.25,
     "min_length_of_recording": 0.5,
     "min_gap_between_recordings": 0,
     "enable_realtime_transcription": True,
-    "realtime_processing_pause": 0.03,
+    "realtime_processing_pause": 0.05,
     "silero_use_onnx": True,
     "silero_deactivity_detection": True,
     "early_transcription_on_silence": 0,
-    "beam_size": 3,
-    "beam_size_realtime": 3,
+    "beam_size": 2,
+    "beam_size_realtime": 2,
     "no_log_file": True,
     "wake_words": "jarvis",
     "wakeword_backend": "pvporcupine",
     "allowed_latency_limit": 500,
     "debug_mode": True,
-    "initial_prompt_realtime": "",
-    "initial_prompt": "",
-    "faster_whisper_vad_filter": False,
+    "initial_prompt_realtime": "Xin chào, đây là câu hỏi tiếng Việt về ngân hàng BIDV, lãi suất và gửi tiết kiệm.",
+    "initial_prompt": "Xin chào, đây là câu hỏi tiếng Việt về ngân hàng BIDV, lãi suất và gửi tiết kiệm.",
+    "faster_whisper_vad_filter": True,
 }
 
 

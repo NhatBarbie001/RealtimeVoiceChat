@@ -89,7 +89,27 @@ function base64ToInt16Array(b64) {
   return new Int16Array(buf);
 }
 
+function cleanupMic() {
+  if (micWorkletNode) {
+    try {
+      micWorkletNode.disconnect();
+    } catch (e) {
+      console.warn("Error disconnecting micWorkletNode:", e);
+    }
+    micWorkletNode = null;
+  }
+  if (mediaStream) {
+    try {
+      mediaStream.getAudioTracks().forEach(track => track.stop());
+    } catch (e) {
+      console.warn("Error stopping mediaStream tracks:", e);
+    }
+    mediaStream = null;
+  }
+}
+
 async function startRawPcmCapture() {
+  cleanupMic(); // Ensure previous microphone capture stream/node is fully closed
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -101,8 +121,23 @@ async function startRawPcmCapture() {
       }
     });
     mediaStream = stream;
+    
+    // Listen for mic track termination (e.g. permission revoked, physical unplug)
+    stream.getAudioTracks().forEach(track => {
+      track.onended = () => {
+        console.warn("Microphone track ended.");
+        statusDiv.textContent = "Microphone disconnected.";
+      };
+    });
+
     initAudioContext();
-    await audioContext.audioWorklet.addModule('/static/pcmWorkletProcessor.js');
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
+    if (!audioContext.pcmModuleLoaded) {
+      await audioContext.audioWorklet.addModule('/static/pcmWorkletProcessor.js');
+      audioContext.pcmModuleLoaded = true;
+    }
     micWorkletNode = new AudioWorkletNode(audioContext, 'pcm-worklet-processor');
 
     micWorkletNode.port.onmessage = ({ data }) => {
@@ -136,7 +171,10 @@ async function startRawPcmCapture() {
 }
 
 async function setupTTSPlayback() {
-  await audioContext.audioWorklet.addModule('/static/ttsPlaybackProcessor.js');
+  if (!audioContext.ttsModuleLoaded) {
+    await audioContext.audioWorklet.addModule('/static/ttsPlaybackProcessor.js');
+    audioContext.ttsModuleLoaded = true;
+  }
   ttsWorkletNode = new AudioWorkletNode(
     audioContext,
     'tts-playback-processor'
@@ -166,21 +204,22 @@ async function setupTTSPlayback() {
 }
 
 function cleanupAudio() {
-  if (micWorkletNode) {
-    micWorkletNode.disconnect();
-    micWorkletNode = null;
-  }
+  cleanupMic();
   if (ttsWorkletNode) {
-    ttsWorkletNode.disconnect();
+    try {
+      ttsWorkletNode.disconnect();
+    } catch (e) {
+      console.warn("Error disconnecting ttsWorkletNode:", e);
+    }
     ttsWorkletNode = null;
   }
   if (audioContext) {
-    audioContext.close();
+    try {
+      audioContext.close();
+    } catch (e) {
+      console.warn("Error closing audioContext:", e);
+    }
     audioContext = null;
-  }
-  if (mediaStream) {
-    mediaStream.getAudioTracks().forEach(track => track.stop());
-    mediaStream = null;
   }
 }
 
@@ -309,6 +348,17 @@ document.getElementById("startBtn").onclick = async () => {
   }
   statusDiv.textContent = "Initializing connection...";
 
+  // Initialize and resume AudioContext within user gesture to prevent autoplay blocks
+  initAudioContext();
+  if (audioContext && audioContext.state === "suspended") {
+    try {
+      await audioContext.resume();
+      console.log("AudioContext resumed successfully via user gesture.");
+    } catch (e) {
+      console.error("Failed to resume AudioContext:", e);
+    }
+  }
+
   const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   socket = new WebSocket(`${wsProto}//${location.host}/ws`);
 
@@ -366,3 +416,20 @@ document.getElementById("copyBtn").onclick = () => {
 
 // First render
 renderMessages();
+
+// Listen for microphone permission changes to dynamically re-acquire mic
+if (navigator.permissions && navigator.permissions.query) {
+  navigator.permissions.query({ name: 'microphone' }).then((permissionStatus) => {
+    permissionStatus.onchange = () => {
+      console.log("Microphone permission status changed to:", permissionStatus.state);
+      if (permissionStatus.state === 'granted') {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          console.log("Microphone permission re-granted. Re-acquiring mic...");
+          startRawPcmCapture();
+        }
+      }
+    };
+  }).catch(err => {
+    console.warn("Permissions API not fully supported for microphone on this browser:", err);
+  });
+}

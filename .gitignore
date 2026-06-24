@@ -8,3 +8,20 @@ code/__pycache__/
 # Binaries and Large files
 code/cloudflared.deb
 code/models/
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables
+.env
+.env.*
+code/.env
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+#file test
+code/test_out.txt

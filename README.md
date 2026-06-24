@@ -1,7 +1,7 @@
 
 # Real-Time AI Voice Chat 🎤💬🧠🔊
 [ Run the claudeflare] :[cloudflared tunnel --url http://localhost:8000]
-
+                            .\.venv\Scripts\Activate.ps1
 **Have a natural, spoken conversation with an AI!**  
 
 This project lets you chat with a Large Language Model (LLM) using just your voice, receiving spoken responses in near real-time. Think of it as your own digital conversation partner.

@@ -44,8 +44,8 @@ TTS_START_ENGINE = "edge"
 TTS_ORPHEUS_MODEL = "Orpheus_3B-1BaseGGUF/mOrpheus_3B-1Base_Q4_K_M.gguf"
 TTS_ORPHEUS_MODEL = "orpheus-3b-0.1-ft-Q8_0-GGUF/orpheus-3b-0.1-ft-q8_0.gguf"
 
-LLM_START_PROVIDER = "awlee"
-LLM_START_MODEL = "awlee-agent"
+LLM_START_PROVIDER = "gemini"
+LLM_START_MODEL = "gemini-2.5-flash"
 # LLM_START_PROVIDER = "ollama"
 # LLM_START_MODEL = "hf.co/bartowski/huihui-ai_Mistral-Small-24B-Instruct-2501-abliterated-GGUF:Q4_K_M"
 # LLM_START_PROVIDER = "lmstudio"
@@ -83,19 +83,25 @@ LANGUAGE = "vi"
 
 BIDV_SAVINGS_QUESTIONS = [
     "Lãi suất gửi tiết kiệm BIDV là bao nhiêu?",
-    "Có những hình thức gửi tiết kiệm nào ở BIDV?",
+    "Có những cách gửi tiết kiệm nào ở BIDV?",
     "làm thế nào để mở sổ tiết kiệm tại BIDV?",
-    "Gửi tiết kiệm online tại BIDV có an toàn và được lợi ích gì không?",
+    "so sánh gửi tiết kiệm online và tại quầy ở BIDV",
+    "Gửi tiết kiệm online tại BIDV có an toàn không?",
     "Gửi tiết kiệm rút trước hạn tại BIDV thì tính lãi suất như thế nào?",
     "Số tiền tối thiểu để mở sổ tiết kiệm tại BIDV là bao nhiêu?",
     "BIDV có những kỳ hạn gửi tiết kiệm nào phổ biến nhất?",
     "Tôi có thể chuyển nhượng hoặc cầm cố sổ tiết kiệm BIDV không?",
     "Cách tính tiền lãi gửi tiết kiệm tại BIDV như thế nào?",
     "Làm thế nào để tất toán sổ tiết kiệm BIDV khi đến hạn?",
+    "100 triệu 6 tháng thì được bao nhiêu?",
+    "100 triệu 3 tháng thì được bao nhiêu?",
+    "Nói ngắn gọn lại",
     "Nói ngắn gọn thôi",
+    "Tóm tắt cho tôi"
     "Không phải",
     "xin chào",
-    "Hello!"
+    "Hello!",
+    "ok"
 ]
 
 # TTS_FINAL_TIMEOUT = 0.5 # unsure if 1.0 is needed for stability
@@ -331,10 +337,14 @@ async def process_incoming_data(ws: WebSocket, app: FastAPI, incoming_chunks: as
                     logger.info("🖥️ℹ️ Received tts_start from client.")
                     # Update connection-specific state via callbacks
                     callbacks.tts_client_playing = True
+                    callbacks.cancel_suggestion_timer()
                 elif msg_type == "tts_stop":
                     logger.info("🖥️ℹ️ Received tts_stop from client.")
                     # Update connection-specific state via callbacks
                     callbacks.tts_client_playing = False
+                    # Restart/update suggestion timer now that client finished playing audio
+                    if not getattr(callbacks, "is_saying_goodbye", False):
+                        callbacks.on_ai_finished_speaking()
                 # Add to the handleJSONMessage function in server.py
                 elif msg_type == "clear_history":
                     logger.info("🖥️ℹ️ Received clear_history from client.")
@@ -644,7 +654,7 @@ class TranscriptionCallbacks:
         self.partial_transcription: str = "" # Added for clarity
         self.ai_finished_speaking_time: float = 0.0
         self.suggestion_timer_task: Optional[asyncio.Task] = None
-        self.SUGGESTION_DELAY_SECONDS: int = 30 # 30 seconds timeout for suggestion
+        self.SUGGESTION_DELAY_SECONDS: int = 30 # Giảm từ 30 xuống 15 giây
         self.consecutive_suggestions_count: int = 0
         self.is_saying_goodbye: bool = False
 
@@ -686,38 +696,61 @@ class TranscriptionCallbacks:
             logger.info("\ud83d\udda5\ufe0f\ud83d\udca1 Suggestion timer expired. Requesting LLM suggestion.")
 
             # Check if AI has recently spoken and user hasn't interrupted or spoken
-            # This check is a failsafe; main cancellation should prevent this.
+            # Also check if pipeline is STILL generating audio (tts_to_client or active running_generation)
+            manager = self.app.state.SpeechPipelineManager
+            is_generating = self.tts_to_client or self.tts_client_playing or (manager.running_generation is not None and not manager.running_generation.audio_final_finished)
+            
             if not self.app.state.AudioInputProcessor.interrupted and \
-               (time.time() - self.ai_finished_speaking_time) >= self.SUGGESTION_DELAY_SECONDS:
+               not is_generating and \
+               (time.time() - self.ai_finished_speaking_time) >= (self.SUGGESTION_DELAY_SECONDS - 2.0):
 
                 # Enable TTS streaming to the client for the suggestion
                 self.tts_to_client = True
 
                 self.consecutive_suggestions_count += 1
-                logger.info(f"\ud83d\udda5\ufe0f\ud83d\udca1 Consecutive silence triggered (Count: {self.consecutive_suggestions_count}).")
+                logger.info(f"🖥️💡 Consecutive silence triggered (Count: {self.consecutive_suggestions_count}).")
 
                 if self.consecutive_suggestions_count <= 2:
                     # Lần 1 và 2: Gợi ý bình thường
-                    self.app.state.SpeechPipelineManager.process_generate_suggestion(self.message_queue, suggestion_type="normal")
+                    await asyncio.to_thread(
+                        self.app.state.SpeechPipelineManager.process_generate_suggestion,
+                        self.message_queue,
+                        "normal"
+                    )
                 elif self.consecutive_suggestions_count == 3:
                     # Lần 3: Hỏi thăm xem còn đó không
-                    self.app.state.SpeechPipelineManager.process_generate_suggestion(self.message_queue, suggestion_type="check_presence")
+                    await asyncio.to_thread(
+                        self.app.state.SpeechPipelineManager.process_generate_suggestion,
+                        self.message_queue,
+                        "check_presence"
+                    )
                 else:
                     # Lần 4+: Nói lời tạm biệt lịch sự rồi mới đóng kết nối
                     self.is_saying_goodbye = True
                     logger.info("🖥️🔌 Max consecutive suggestions. Saying goodbye before closing.")
-                    self.app.state.SpeechPipelineManager.process_generate_suggestion(
-                        self.message_queue, suggestion_type="goodbye"
+                    await asyncio.to_thread(
+                        self.app.state.SpeechPipelineManager.process_generate_suggestion,
+                        self.message_queue,
+                        "goodbye"
                     )
                     # Wait for the TTS goodbye to complete before closing
                     # We poll until tts_to_client flips back to False (meaning pipeline finished)
-                    logger.info("\ud83d\udda5\ufe0f\u23f3 Waiting for goodbye TTS to finish before closing...")
                     logger.info("🖥️⌛ Waiting for goodbye TTS to finish before closing...")
                     wait_start = time.time()
-                    while self.tts_to_client and (time.time() - wait_start) < 20.0:
+                    
+                    # Chờ cho đến khi cả Server (tts_to_client) và Client (tts_client_playing) đều phát xong
+                    while (self.tts_to_client or self.tts_client_playing) and (time.time() - wait_start) < 20.0:
                         await asyncio.sleep(0.2)
-                    # Give a small extra buffer for audio to play out on client side
-                    await asyncio.sleep(2.0)
+
+                    # Kiểm tra xem người dùng có ngắt lời (nói chen vào) trong lúc AI đang chào tạm biệt không
+                    if not self.is_saying_goodbye:
+                        logger.info("🖥️✅ Goodbye interrupted by user speech. Session continues.")
+                        self.suggestion_timer_task = None
+                        return
+
+                    # Give a small extra buffer for network latency of the stop message
+                    await asyncio.sleep(0.5)
+                    self.is_saying_goodbye = False
                     logger.info("🖥️🔌 Goodbye spoken. Closing WebSocket connection.")
                     self.send_to_client({
                         "type": "close_connection",
@@ -740,7 +773,6 @@ class TranscriptionCallbacks:
         self.tts_chunk_sent = False
         # Don't reset tts_client_playing here, it reflects client state reports
         self.interruption_time = 0.0
-        self.is_saying_goodbye = False
 
         # Reset other state variables
         self.silence_active = True
@@ -790,8 +822,9 @@ class TranscriptionCallbacks:
             if score > best_score:
                 best_score = score
                 best_match = question
-        if score < 0.1:
+        if best_score < 0.2:
             best_match = trimmed
+        logger.info(f"best_score: {best_score}")
         logger.info(f"🖥️🔍 Mapping input '{trimmed}' to closest BIDV question: '{best_match}' (score: {best_score:.4f})")
         return best_match
 
@@ -1020,6 +1053,8 @@ class TranscriptionCallbacks:
         logger.info(f"{Colors.ORANGE}🖥️🎙️ Recording started.{Colors.RESET} TTS Client Playing: {self.tts_client_playing}, TTS To Client: {self.tts_to_client}, Chunk Sent: {self.tts_chunk_sent}")
         self.consecutive_suggestions_count = 0
         self.cancel_suggestion_timer()
+        self.is_saying_goodbye = False # Đặt lại cờ nếu người dùng nói (kể cả lúc đang goodbye)
+        
         # Check multiple signals to detect if AI is currently active/speaking.
         # tts_client_playing alone is unreliable due to network round-trip latency
         # (e.g. through cloudflared tunnel, client may not have sent tts_start yet).
@@ -1101,7 +1136,8 @@ class TranscriptionCallbacks:
                     "type": "final_assistant_answer",
                     "content": cleaned_answer
                 })
-                app.state.SpeechPipelineManager.history.append({"role": "assistant", "content": cleaned_answer})
+                history_answer = f'"{cleaned_answer}" [interrupted by user]' if forced else cleaned_answer
+                app.state.SpeechPipelineManager.history.append({"role": "assistant", "content": history_answer})
                 self.final_assistant_answer_sent = True
                 self.final_assistant_answer = cleaned_answer # Store the sent answer
                 # Now trigger the method to start the suggestion timer

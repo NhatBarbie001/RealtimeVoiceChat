@@ -30,7 +30,7 @@ class TextContext:
         else:
             self.split_tokens: Set[str] = set(split_tokens)
 
-    def get_context(self, txt: str, min_len: int = 6, max_len: int = 120, min_alnum_count: int = 10) -> Tuple[Optional[str], Optional[str]]:
+    def get_context(self, txt: str, min_len: int = 6, max_len: int = 120, min_alnum_count: int = 5) -> Tuple[Optional[str], Optional[str]]:
         """
         Finds the shortest valid context at the beginning of the input text.
 

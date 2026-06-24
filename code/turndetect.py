@@ -489,10 +489,11 @@ class TurnDetection:
             logger.info(f"🎤📊 Calculated pauses: Punct={whisper_suggested_pause:.2f}, Model={sentence_finished_model_pause:.2f}, Weighted={weighted_pause:.2f}, Final={final_pause:.2f} for \"{processed_text}\" (Prob={prob_complete:.2f})")
 
 
-            # Ensure final pause is not less than the pipeline latency overhead
-            min_pause = self.pipeline_latency + self.pipeline_latency_overhead
+            # Ensure final pause is not unreasonably small, but DO NOT tie it to pipeline latency
+            # tying it to pipeline latency artificially delays STT turn completion.
+            min_pause = 0.2
             if final_pause < min_pause:
-                logger.info(f"🎤⚠️ Final pause ({final_pause:.2f}s) is less than minimum ({min_pause:.2f}s). Using minimum.")
+                logger.info(f"🎤⚠️ Final pause ({final_pause:.2f}s) is very small. Using minimum ({min_pause:.2f}s).")
                 final_pause = min_pause
             
             # Suggest the calculated time via callback

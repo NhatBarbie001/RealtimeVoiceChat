@@ -59,6 +59,7 @@ except ImportError:
     logger.debug("🤖💥 Error importing dotenv, skipping .env load.")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 LMSTUDIO_BASE_URL = os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
  
@@ -197,7 +198,7 @@ class LLM:
     Handles client initialization, streaming generation, request cancellation,
     system prompts, and basic connection management including an optional `ollama ps` check.
     """
-    SUPPORTED_BACKENDS = ["ollama", "openai", "lmstudio", "awlee"]
+    SUPPORTED_BACKENDS = ["ollama", "openai", "lmstudio", "awlee", "gemini"]
 
     def __init__(
         self,
@@ -230,8 +231,8 @@ class LLM:
 
         if self.backend == "ollama" and not REQUESTS_AVAILABLE:
              raise ImportError("requests library is required for the 'ollama' backend but not installed.")
-        if self.backend in ["openai", "lmstudio"] and not OPENAI_AVAILABLE:
-             raise ImportError("openai library is required for the 'openai'/'lmstudio' backends but not installed.")
+        if self.backend in ["openai", "lmstudio", "gemini"] and not OPENAI_AVAILABLE:
+             raise ImportError("openai library is required for the 'openai'/'lmstudio'/'gemini' backends but not installed.")
 
         self.model = model
         self.system_prompt = system_prompt
@@ -305,14 +306,14 @@ class LLM:
             False otherwise.
         """
         if self._client_initialized:
-            if self.backend in ["openai", "lmstudio"]: return self.client is not None
+            if self.backend in ["openai", "lmstudio", "gemini"]: return self.client is not None
             if self.backend == "ollama": return self.ollama_session is not None and self._ollama_connection_ok # Check flag
             if self.backend == "awlee": return self.awlee_session is not None and self._awlee_authenticated
             return False
 
         with self._client_init_lock:
             if self._client_initialized: # Double check
-                if self.backend in ["openai", "lmstudio"]: return self.client is not None
+                if self.backend in ["openai", "lmstudio", "gemini"]: return self.client is not None
                 if self.backend == "ollama": return self.ollama_session is not None and self._ollama_connection_ok
                 if self.backend == "awlee": return self.awlee_session is not None and self._awlee_authenticated
                 return False
@@ -327,6 +328,9 @@ class LLM:
                     init_ok = self.client is not None
                 elif self.backend == "lmstudio":
                     self.client = _create_openai_client(api_key="lmstudio-key", base_url=self.effective_lmstudio_url)
+                    init_ok = self.client is not None
+                elif self.backend == "gemini":
+                    self.client = _create_openai_client(api_key=GEMINI_API_KEY, base_url="https://generativelanguage.googleapis.com/v1beta/openai/")
                     init_ok = self.client is not None
                 elif self.backend == "ollama":
                     if self.ollama_session and self.effective_ollama_url:
@@ -691,6 +695,10 @@ class LLM:
         if use_system_prompt and self.system_prompt_message:
             messages.append(self.system_prompt_message)
         if history:
+            # If history starts with assistant, prepend a dummy user message for strict API compatibility
+            if history[0]["role"] == "assistant":
+                logger.info("🧠💬 First message in history is assistant, prepending user greeting 'Xin chào' for role alternation.")
+                messages.append({"role": "user", "content": "Xin chào"})
             messages.extend(history)
 
         if len(messages) == 0 or messages[-1]["role"] != "user":
@@ -704,6 +712,11 @@ class LLM:
 
         stream_iterator = None
         stream_object_to_register = None # This is the object we need to close on cancel
+
+        # Convert kwargs for OpenAI-compatible clients
+        if self.backend in ["openai", "lmstudio", "gemini"]:
+            if "max_new_tokens" in kwargs:
+                kwargs["max_tokens"] = kwargs.pop("max_new_tokens")
 
         try:
             if self.backend == "openai":
@@ -732,6 +745,42 @@ class LLM:
                 )
                 stream_object_to_register = stream_iterator # The Stream object itself
                 self._register_request(req_id, "lmstudio", stream_object_to_register)
+                yield from self._yield_openai_chunks(stream_iterator, req_id)
+
+            elif self.backend == "gemini":
+                if self.client is None:
+                    raise RuntimeError("Gemini client not initialized (should have been caught by lazy_init).")
+                payload = { "model": self.model, "messages": messages, "stream": True, **kwargs }
+                logger.info(f"🤖💬 [{req_id}] Sending Gemini request with payload:")
+                logger.info(f"{json.dumps(payload, indent=2)}")
+                
+                # Retry loop for Gemini 503 (Service Unavailable) / 429 (Rate Limit) errors
+                max_retries = 3
+                retry_delay = 1.0
+                stream_iterator = None
+                for attempt in range(max_retries + 1):
+                    try:
+                        stream_iterator = self.client.chat.completions.create(
+                            model=self.model, messages=messages, stream=True, **kwargs
+                        )
+                        break
+                    except Exception as e:
+                        is_server_error = False
+                        # Check if status_code exists or check string representation
+                        if hasattr(e, 'status_code') and e.status_code in [429, 503]:
+                            is_server_error = True
+                        elif any(err_str in str(e) for err_str in ["503", "429", "UNAVAILABLE", "demand", "temporary"]):
+                            is_server_error = True
+                        
+                        if is_server_error and attempt < max_retries:
+                            logger.warning(f"🤖⚠️ Gemini API returned error (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {retry_delay}s...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2.0
+                        else:
+                            raise
+
+                stream_object_to_register = stream_iterator # The Stream object itself
+                self._register_request(req_id, "gemini", stream_object_to_register)
                 yield from self._yield_openai_chunks(stream_iterator, req_id)
 
             elif self.backend == "ollama":
