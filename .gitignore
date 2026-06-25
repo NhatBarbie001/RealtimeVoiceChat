@@ -25,3 +25,7 @@ code/.env
 *.bak
 #file test
 code/test_out.txt
+
+code/test/models/
+code/test/__pycache__/
+*.onnx
